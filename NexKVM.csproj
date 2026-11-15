@@ -18,7 +18,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <AssemblyTitle>NexKVM</AssemblyTitle>
     <Product>NexKVM</Product>
-    <Version>1.1.0</Version>
+    <Version>2.0.0</Version>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
   </PropertyGroup>
 
