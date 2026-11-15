@@ -6,7 +6,7 @@ namespace NexKVM;
 
 /// <summary>
 /// Host side (the PC with the physical mouse/keyboard). Installs low-level hooks, detects the
-/// edge crossing on the configured side, and while "controlling" the target it swallows local
+/// edge crossing on the configured side of the desktop, and while "controlling" the target it swallows local
 /// input, hides the local cursor, and forwards everything over the link. The host owns the
 /// authoritative virtual cursor position inside the target's screen, so movement never drifts.
 /// </summary>
@@ -32,7 +32,8 @@ internal sealed class HostEngine : IMessageHandler
     private volatile Link? _link;
     private volatile bool _running;
 
-    private int _pcW, _pcH, _cx, _cy;
+    private int _vL, _vT, _vW, _vH;      // bounds of the whole desktop (all monitors)
+    private int _cx, _cy;                // where the hidden cursor is parked while away
     private volatile int _lapW, _lapH;
 
     private volatile bool _onRemote;
@@ -52,13 +53,15 @@ internal sealed class HostEngine : IMessageHandler
     {
         if (_running) return;
         _running = true;
-        _pcW = Native.GetSystemMetrics(Native.SM_CXSCREEN);
-        _pcH = Native.GetSystemMetrics(Native.SM_CYSCREEN);
-        _cx = _pcW / 2; _cy = _pcH / 2;
+        _vL = Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN);
+        _vT = Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN);
+        _vW = Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN);
+        _vH = Native.GetSystemMetrics(Native.SM_CYVIRTUALSCREEN);
+        _cx = Native.GetSystemMetrics(Native.SM_CXSCREEN) / 2;
+        _cy = Native.GetSystemMetrics(Native.SM_CYSCREEN) / 2;
 
-        Log?.Invoke($"Host started. Primary screen {_pcW}x{_pcH}. Target on the {_side} edge.");
-        Log?.Invoke("Failsafe: Ctrl+Alt+F12 forces control back to this PC.");
-
+        Log?.Invoke($"Host started. Desktop {_vW}x{_vH}. Receiver on the {_side.ToString().ToLowerInvariant()} edge.");
+        
         StartHookThread();
         _clipThread = new Thread(ClipboardLoop) { IsBackground = true };
         _clipThread.Start();
@@ -95,7 +98,7 @@ internal sealed class HostEngine : IMessageHandler
                 var link = new Link(sock);
                 _link = link;
                 StatusChanged?.Invoke(EngineStatus.Connected);
-                Log?.Invoke("Connected. Move the mouse into the target edge to switch machines.");
+                Log?.Invoke("Connected to the receiver.");
                 link.ReceiveLoop(this);
             }
             catch (Exception ex)
@@ -160,10 +163,16 @@ internal sealed class HostEngine : IMessageHandler
         {
             if (msg == Native.WM_MOUSEMOVE && !injected && link is { IsClosed: false } && _lapW > 0)
             {
-                bool atEdge = _side == TargetSide.Left ? ms.pt.x <= 0 : ms.pt.x >= _pcW - 1;
+                bool atEdge = _side switch
+                {
+                    TargetSide.Left => ms.pt.x <= _vL,
+                    TargetSide.Right => ms.pt.x >= _vL + _vW - 1,
+                    TargetSide.Top => ms.pt.y <= _vT,
+                    _ => ms.pt.y >= _vT + _vH - 1,
+                };
                 if (atEdge)
                 {
-                    EnterRemote(ms.pt.y, link);
+                    EnterRemote(ms.pt, link);
                     return (IntPtr)1;
                 }
             }
@@ -176,19 +185,11 @@ internal sealed class HostEngine : IMessageHandler
         switch (msg)
         {
             case Native.WM_MOUSEMOVE:
-                int dx = ms.pt.x - _cx, dy = ms.pt.y - _cy;
-                // Guard against the cursor-warp race: a single event delta larger than half the
-                // screen is a re-park artifact, not real motion — re-centre and ignore it.
-                if (Math.Abs(dx) > _pcW / 2 || Math.Abs(dy) > _pcH / 2)
-                {
-                    Native.SetCursorPos(_cx, _cy);
-                    break;
-                }
-                if (dx != 0 || dy != 0)
-                {
-                    Native.SetCursorPos(_cx, _cy);
-                    UpdateVirtual(dx, dy, link);
-                }
+                // A swallowed move never moves the real cursor, so it stays parked and the hook's
+                // point is simply "parked position + this move". No re-centring, no warp, no jumps.
+                Native.GetCursorPos(out var cur);
+                int dx = ms.pt.x - cur.x, dy = ms.pt.y - cur.y;
+                if (dx != 0 || dy != 0) UpdateVirtual(dx, dy, link);
                 break;
             case Native.WM_LBUTTONDOWN: ForwardButton(0, true, link); break;
             case Native.WM_LBUTTONUP:   ForwardButton(0, false, link); break;
@@ -252,36 +253,50 @@ internal sealed class HostEngine : IMessageHandler
 
     // ---------- State transitions ----------
 
-    private void EnterRemote(int entryY, Link link)
+    private bool Horizontal => _side is TargetSide.Left or TargetSide.Right;
+
+    private void EnterRemote(Native.POINT pt, Link link)
     {
-        // Enter at the far edge of the target (opposite the crossing side) so the cursor slides
-        // in from that edge rather than appearing mid-screen.
-        _vx = _side == TargetSide.Left ? _lapW - 1 : 0;
-        _vy = Math.Clamp(entryY / (double)_pcH * _lapH, 0, _lapH - 1);
+        // Enter on the receiver's edge that faces this PC, at the matching position along it,
+        // so the cursor continues from where it left instead of appearing mid-screen.
+        if (Horizontal)
+        {
+            _vx = _side == TargetSide.Left ? _lapW - 1 : 0;
+            _vy = (pt.y - _vT) / (double)_vH * _lapH;
+        }
+        else
+        {
+            _vy = _side == TargetSide.Top ? _lapH - 1 : 0;
+            _vx = (pt.x - _vL) / (double)_vW * _lapW;
+        }
+        _vx = Math.Clamp(_vx, 0, _lapW - 1);
+        _vy = Math.Clamp(_vy, 0, _lapH - 1);
+
         Native.SetCursorPos(_cx, _cy);
         CursorHider.Hide();
         _onRemote = true;
         link.SendEnter();
         SendVirtual(link);
         StatusChanged?.Invoke(EngineStatus.Controlling);
-        Log?.Invoke("--> control on TARGET");
+        Log?.Invoke("Control moved to the receiver.");
     }
 
     private void UpdateVirtual(int dx, int dy, Link link)
     {
         _vx += dx;
-        _vy = Math.Clamp(_vy + dy, 0, _lapH - 1);
+        _vy += dy;
 
-        if (_side == TargetSide.Left)
+        // Pushed back past the edge we came in through → hand control back to this PC.
+        bool leaving = _side switch
         {
-            if (_vx >= _lapW - 1) { LeaveRemote(); return; }   // pushed back out the right edge
-            if (_vx < 0) _vx = 0;
-        }
-        else
-        {
-            if (_vx <= 0) { LeaveRemote(); return; }            // pushed back out the left edge
-            if (_vx > _lapW - 1) _vx = _lapW - 1;
-        }
+            TargetSide.Left => _vx > _lapW - 1,
+            TargetSide.Right => _vx < 0,
+            TargetSide.Top => _vy > _lapH - 1,
+            _ => _vy < 0,
+        };
+        _vx = Math.Clamp(_vx, 0, _lapW - 1);
+        _vy = Math.Clamp(_vy, 0, _lapH - 1);
+        if (leaving) { LeaveRemote(); return; }
         SendVirtual(link);
     }
 
@@ -294,15 +309,25 @@ internal sealed class HostEngine : IMessageHandler
 
     private void LeaveRemote()
     {
-        int pcY = (int)Math.Clamp(_vy / Math.Max(1, _lapH) * _pcH, 0, _pcH - 1);
-        int backX = _side == TargetSide.Left ? 1 : _pcW - 2;
+        // Reappear just inside the edge we crossed, at the matching position along it.
+        int x, y;
+        if (Horizontal)
+        {
+            x = _side == TargetSide.Left ? _vL + 2 : _vL + _vW - 3;
+            y = _vT + (int)(_vy / Math.Max(1, _lapH - 1) * (_vH - 1));
+        }
+        else
+        {
+            y = _side == TargetSide.Top ? _vT + 2 : _vT + _vH - 3;
+            x = _vL + (int)(_vx / Math.Max(1, _lapW - 1) * (_vW - 1));
+        }
         ReleaseHeld();
         _onRemote = false;
         _link?.SendLeave();
+        Native.SetCursorPos(x, y);
         CursorHider.Restore();
-        Native.SetCursorPos(backX, pcY);       // reappear on the same edge we left from, same height
         if (_link is { IsClosed: false }) StatusChanged?.Invoke(EngineStatus.Connected);
-        Log?.Invoke("<-- control back on PC");
+        Log?.Invoke("Control returned to this PC.");
     }
 
     private void ForceLocal()
@@ -312,7 +337,7 @@ internal sealed class HostEngine : IMessageHandler
         _onRemote = false;
         CursorHider.Restore();
         Native.SetCursorPos(_cx, _cy);
-        Log?.Invoke("<-- control back on PC (forced)");
+        Log?.Invoke("Control returned to this PC (forced).");
     }
 
     private void ReleaseHeld()
@@ -343,7 +368,7 @@ internal sealed class HostEngine : IMessageHandler
     public void OnScreenInfo(int width, int height)
     {
         _lapW = width; _lapH = height;
-        Log?.Invoke($"Target screen {width}x{height} — edge crossing enabled.");
+        Log?.Invoke($"Receiver screen {width}x{height}. Edge crossing is active.");
     }
 
     public void OnClipboard(string text)
@@ -355,7 +380,7 @@ internal sealed class HostEngine : IMessageHandler
 
     public void OnDisconnected()
     {
-        if (_running) Log?.Invoke("Target disconnected.");
+        if (_running) Log?.Invoke("Receiver disconnected.");
         ForceLocal();
     }
 }

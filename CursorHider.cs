@@ -37,7 +37,8 @@ internal static class CursorHider
     {
         if (!_hidden) return;
         _hidden = false;
-        // Reload the user's default system cursors.
-        Native.SystemParametersInfo(Native.SPI_SETCURSORS, 0, IntPtr.Zero, Native.SPIF_SENDCHANGE);
+        // Reload the user's default system cursors. No settings-change broadcast: that is a
+        // synchronous message to every window and would stall the input hook at the hand-back.
+        Native.SystemParametersInfo(Native.SPI_SETCURSORS, 0, IntPtr.Zero, 0);
     }
 }

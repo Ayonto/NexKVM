@@ -6,7 +6,7 @@ namespace NexKVM;
 internal enum EngineStatus { Stopped, Listening, Connecting, Connected, Controlling }
 
 /// <summary>Which side of the host PC the target machine sits on (where the cursor crosses).</summary>
-internal enum TargetSide { Left, Right }
+internal enum TargetSide { Left, Right, Top, Bottom }
 
 internal static class NetUtil
 {

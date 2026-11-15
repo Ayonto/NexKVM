@@ -17,8 +17,9 @@ millisecond and it feels like one continuous desktop.
 
 ## Features
 
-- 🖱️ **Seamless edge crossing** — the cursor slides in from the far edge of the other screen; pick
-  which side (left/right) the other machine is on.
+- 🖱️ **Seamless edge crossing** — the cursor continues onto the other screen from the edge it left.
+- 🧩 **Drag-to-arrange screens** — like the Windows display settings: drag the receiver to the
+  left, right, top or bottom of your PC and the pointer crosses on that side.
 - ⌨️ **Full keyboard follow** — every key goes to whichever screen the cursor is on (forwarded by
   scan code, so layouts and modifiers work correctly).
 - 📋 **Clipboard sync** — copy text on one machine, paste on the other.
@@ -46,18 +47,19 @@ Any PC can be the host and any PC can be the receiver — nothing is tied to a s
 
 2. **On the machine being controlled** (the receiver — e.g. your laptop):
    - Run `NexKVM.exe`.
-   - Choose **“This PC is controlled (Receiver)”**.
+   - Set **Mode** to **Receiver**.
    - Note the **IP address** it shows (e.g. `192.168.1.50`) — you'll need it on the host. Click
      **Copy** if handy.
-   - Press **Start**. It now says *“Listening for host…”*.
+   - Press **Start**. The status shows *Waiting for host*.
    - If Windows shows a firewall prompt, allow it on **Private** networks.
 
 3. **On the machine with the mouse/keyboard** (the host — e.g. your desktop):
    - Run `NexKVM.exe`.
-   - Choose **“This PC controls (Host)”**.
+   - Set **Mode** to **Host**.
    - Enter the receiver's **IP address**.
-   - Set **“Receiver is on my … side”** to match where that machine physically sits (Left or Right).
-   - Press **Start**. It should say *“Connected”*.
+   - Under **Screen arrangement**, drag the receiver to the side of your PC where that machine
+     physically sits (left, right, above or below).
+   - Press **Start**. The status shows *Connected*.
 
 4. **Use it:** push your mouse off the chosen edge of the host screen → it appears on the receiver.
    Type anywhere; keys go where the cursor is. Push back off the opposite edge to return.
@@ -103,7 +105,7 @@ it for release.
 | Concern | Approach |
 |---|---|
 | Capture (host) | `WH_MOUSE_LL` + `WH_KEYBOARD_LL` low-level hooks on a dedicated high-priority thread |
-| Edge crossing | While away, the host re-parks the cursor at screen centre each move and drives a virtual cursor inside the receiver's resolution; a warp-race guard prevents mid-screen jumps |
+| Edge crossing | While away, the host swallows mouse moves in the hook, so its own cursor never moves, and feeds each movement into a virtual cursor inside the receiver's resolution. Nothing is warped or re-centred, so there is nothing to snap |
 | No drift | The host sends **absolute normalised** positions (0–65535), not raw deltas |
 | Hidden cursor | The host swaps all system cursors for a blank one while controlling the receiver, so no stray pointer is left on the host screen |
 | Inject (receiver) | `SendInput` with scan codes and absolute coordinates |
@@ -114,7 +116,9 @@ it for release.
 
 - **Windows ↔ Windows** only for now (macOS/Linux receivers would need a different injection backend).
 - Clipboard sync is **text only** (no images or files).
-- The host uses its **primary monitor's** edge as the crossing point.
+- With several monitors on the host, the crossing edge is the outer edge of the whole desktop
+  on the chosen side.
+- The receiver is driven on its **primary** monitor.
 - Not encrypted — use on a trusted LAN.
 
 ## License

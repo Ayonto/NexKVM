@@ -6,10 +6,14 @@ namespace NexKVM;
 /// </summary>
 internal static class Injector
 {
+    private static readonly int InputSize = System.Runtime.InteropServices.Marshal.SizeOf<Native.INPUT>();
+    [ThreadStatic] private static Native.INPUT[]? _buf;   // reused: no allocation per event
+
     private static void Send(Native.INPUT input)
     {
-        var arr = new[] { input };
-        Native.SendInput(1, arr, System.Runtime.InteropServices.Marshal.SizeOf<Native.INPUT>());
+        var arr = _buf ??= new Native.INPUT[1];
+        arr[0] = input;
+        Native.SendInput(1, arr, InputSize);
     }
 
     public static void MoveAbsolute(ushort xNorm, ushort yNorm)

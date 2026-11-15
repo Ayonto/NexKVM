@@ -48,7 +48,7 @@ internal sealed class TargetEngine : IMessageHandler
 
         _clipThread = new Thread(ClipboardLoop) { IsBackground = true };
         _clipThread.Start();
-        _acceptThread = new Thread(AcceptLoop) { IsBackground = true };
+        _acceptThread = new Thread(AcceptLoop) { IsBackground = true, Priority = ThreadPriority.AboveNormal };
         _acceptThread.Start();
     }
 
@@ -81,7 +81,7 @@ internal sealed class TargetEngine : IMessageHandler
             if (_running)
             {
                 StatusChanged?.Invoke(EngineStatus.Listening);
-                Log?.Invoke("Host disconnected — listening again.");
+                Log?.Invoke("Host disconnected. Waiting for it to reconnect.");
             }
         }
     }
@@ -93,8 +93,8 @@ internal sealed class TargetEngine : IMessageHandler
     public void OnMouseWheel(short delta, bool horizontal) => Injector.Wheel(delta, horizontal);
     public void OnKey(bool down, ushort scan, bool extended) => Injector.Key(down, scan, extended);
 
-    public void OnEnter() => Log?.Invoke("<-- control is HERE");
-    public void OnLeave() => Log?.Invoke("--> control returned to host");
+    public void OnEnter() => Log?.Invoke("The host is now controlling this PC.");
+    public void OnLeave() => Log?.Invoke("Control returned to the host.");
 
     public void OnClipboard(string text)
     {

@@ -246,7 +246,6 @@ internal static class Native
     public const uint OCR_APPSTARTING = 32650;
 
     public const uint SPI_SETCURSORS = 0x0057;
-    public const uint SPIF_SENDCHANGE = 0x02;
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern IntPtr CreateCursor(IntPtr hInst, int xHotSpot, int yHotSpot,
@@ -264,5 +263,15 @@ internal static class Native
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, IntPtr pvParam, uint fWinIni);
 
-    // ---- Local machine IP discovery helpers use managed APIs; nothing needed here. ----
+    // ---- Window chrome (dark title bar, dark scrollbars) ----
+    public const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+    public const int DWMWA_BORDER_COLOR = 34;
+    public const int DWMWA_CAPTION_COLOR = 35;
+    public const int DWMWA_TEXT_COLOR = 36;
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    public static extern int SetWindowTheme(IntPtr hwnd, string? subAppName, string? subIdList);
 }

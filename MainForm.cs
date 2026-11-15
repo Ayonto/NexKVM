@@ -6,40 +6,153 @@ namespace NexKVM;
 
 internal sealed class MainForm : Form
 {
-    // Palette.
-    private static readonly Color Bg = Color.FromArgb(30, 30, 36);
-    private static readonly Color Panel = Color.FromArgb(40, 40, 48);
-    private static readonly Color TextCol = Color.FromArgb(232, 232, 238);
-    private static readonly Color SubText = Color.FromArgb(150, 150, 162);
-    private static readonly Color Border = Color.FromArgb(62, 62, 74);
-    private static readonly Color Accent = Color.FromArgb(61, 200, 140);   // green
-    private static readonly Color StopCol = Color.FromArgb(226, 92, 92);   // red
-    private static readonly Color Amber = Color.FromArgb(230, 180, 70);
-    private static readonly Color Blue = Color.FromArgb(90, 150, 245);
-
     private readonly Settings _cfg = Settings.Load();
+    private readonly string? _autoRole;
 
-    private RadioButton _rbHost = null!, _rbReceiver = null!;
-    private Panel _pnlConfig = null!;
-    private TextBox _txtIp = null!, _txtPort = null!, _txtLog = null!, _txtMyIps = null!;
-    private ComboBox _cmbSide = null!;
-    private CheckBox _chkClip = null!;
-    private Label _lblHostIp = null!, _lblHostSide = null!, _lblMyIps = null!, _lblStatus = null!, _lblDot = null!;
-    private Button _btnStartStop = null!, _btnCopyIp = null!;
+    // Every control with its position in 96-dpi units; LayoutUi scales these to the screen.
+    private readonly List<(Control Control, Rectangle Rect)> _slots = new();
+
+    private readonly StatusPill _pill = new();
+    private readonly SegmentedControl _role = new("Host", "Receiver");
+    private readonly Card _cardMode = new() { Title = "Mode" };
+    private readonly Card _cardConn = new() { Title = "Connection" };
+    private readonly Card _cardOptions = new() { Title = "Options" };
+    private readonly Card _cardArrange = new() { Title = "Screen arrangement" };
+    private readonly Card _cardActivity = new() { Title = "Activity" };
+    private readonly Label _roleHint = Hint(), _lblAddr = Hint(), _lblPort = Hint(), _connHint = Hint(),
+        _arrangeHint = Hint(), _footer = Hint();
+    private readonly InputBox _txtIp = new(), _txtMyIp = new(), _txtPort = new();
+    private readonly AccentButton _btnCopy = new() { Text = "Copy", Kind = ButtonKind.Ghost, Font = Theme.Body };
+    private readonly AccentButton _btnRun = new() { Text = "Start" };
+    private readonly ToggleSwitch _clip = new() { Text = "Sync clipboard text between the two PCs", Checked = true };
+    private readonly ArrangementView _arrange = new();
+    private readonly RichTextBox _log = new()
+    {
+        BorderStyle = BorderStyle.None, ReadOnly = true, DetectUrls = false, TabStop = false,
+        BackColor = Theme.Surface, ForeColor = Theme.Text, Font = Theme.Small,
+        ScrollBars = RichTextBoxScrollBars.Vertical
+    };
 
     private HostEngine? _host;
     private TargetEngine? _target;
     private bool _running;
-    private readonly string? _autoRole;
+    private EngineStatus _status = EngineStatus.Stopped;
+
+    private bool IsHost => _role.SelectedIndex == 0;
 
     public MainForm(string? autoRole = null, string? autoIp = null)
     {
         _autoRole = autoRole;
         BuildUi();
         ApplySettings();
-        if (autoRole == "host") { _rbHost.Checked = true; if (autoIp != null) _txtIp.Text = autoIp; }
-        else if (autoRole == "receiver") { _rbReceiver.Checked = true; }
-        UpdateRoleVisibility();
+        if (autoRole == "host") { _role.SelectedIndex = 0; if (autoIp != null) _txtIp.Text = autoIp; }
+        else if (autoRole == "receiver") _role.SelectedIndex = 1;
+        UpdateRole();
+    }
+
+    // ---------------- construction ----------------
+
+    private void BuildUi()
+    {
+        Text = "NexKVM";
+        AutoScaleMode = AutoScaleMode.None;
+        BackColor = Theme.Bg;
+        ForeColor = Theme.Text;
+        Font = Theme.Body;
+        FormBorderStyle = FormBorderStyle.FixedSingle;
+        MaximizeBox = false;
+        StartPosition = FormStartPosition.CenterScreen;
+        DoubleBuffered = true;
+        using (var ico = typeof(MainForm).Assembly.GetManifestResourceStream("NexKVM.ico"))
+            if (ico != null) Icon = new Icon(ico);
+
+        Controls.Add(_pill);
+
+        // Left column.
+        Place(_cardMode, this, 24, 92, 400, 126);
+        Place(_role, _cardMode, 20, 46, 360, 38);
+        Place(_roleHint, _cardMode, 17, 94, 360, 20);
+
+        Place(_cardConn, this, 24, 230, 400, 150);
+        Place(_lblAddr, _cardConn, 17, 44, 250, 20);
+        Place(_lblPort, _cardConn, 279, 44, 98, 20);
+        Place(_txtIp, _cardConn, 20, 68, 250, 36);
+        Place(_txtMyIp, _cardConn, 20, 68, 180, 36);
+        Place(_btnCopy, _cardConn, 208, 68, 62, 36);
+        Place(_txtPort, _cardConn, 282, 68, 98, 36);
+        Place(_connHint, _cardConn, 17, 116, 360, 20);
+
+        Place(_cardOptions, this, 24, 392, 400, 92);
+        Place(_clip, _cardOptions, 20, 48, 360, 28);
+
+        Place(_btnRun, this, 24, 500, 400, 46);
+        Place(_footer, this, 21, 558, 400, 40);
+
+        // Right column.
+        Place(_cardArrange, this, 440, 92, 456, 288);
+        Place(_arrangeHint, _cardArrange, 17, 40, 416, 20);
+        Place(_arrange, _cardArrange, 20, 66, 416, 210);
+
+        Place(_cardActivity, this, 440, 392, 456, 206);
+        Place(_log, _cardActivity, 20, 46, 424, 146);
+
+        _lblPort.Text = "Port";
+        _arrangeHint.Text = "Drag the receiver to the side of this PC where it sits.";
+        _txtIp.Box.PlaceholderText = "192.168.1.50";
+        _txtMyIp.Box.ReadOnly = true;
+        _txtPort.Box.MaxLength = 5;
+
+        _role.SelectedIndexChanged += (_, _) => UpdateRole();
+        _btnRun.Click += (_, _) => ToggleRun();
+        _btnCopy.Click += async (_, _) =>
+        {
+            if (_txtMyIp.Text.Length == 0) return;
+            Clipboard.SetText(_txtMyIp.Text);
+            _btnCopy.Text = "Copied";
+            await Task.Delay(1200);
+            _btnCopy.Text = "Copy";
+        };
+        _log.HandleCreated += (_, _) => Theme.DarkScrollbars(_log);
+
+        LayoutUi();
+    }
+
+    private static Label Hint() => new() { ForeColor = Theme.Muted, Font = Theme.Small, AutoSize = false };
+
+    private void Place(Control c, Control parent, int x, int y, int w, int h)
+    {
+        parent.Controls.Add(c);
+        _slots.Add((c, new Rectangle(x, y, w, h)));
+    }
+
+    private void LayoutUi()
+    {
+        float s = DeviceDpi / 96f;
+        Rectangle R(int x, int y, int w, int h) => new((int)(x * s), (int)(y * s), (int)(w * s), (int)(h * s));
+
+        ClientSize = R(0, 0, 920, 616).Size;
+        foreach (var (c, r) in _slots) c.Bounds = R(r.X, r.Y, r.Width, r.Height);
+
+        if (!IsHost)   // no arrangement to show on a receiver: the activity log takes the column
+        {
+            _cardActivity.Bounds = R(440, 92, 456, 506);
+            _log.Bounds = R(20, 46, 424, 446);
+        }
+        _pill.Bounds = R(746, 28, 150, 30);
+        ShowStatus(_status);
+        Invalidate();
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        Theme.ApplyWindowChrome(this);
+    }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        LayoutUi();
     }
 
     protected override void OnShown(EventArgs e)
@@ -48,230 +161,68 @@ internal sealed class MainForm : Form
         if (_autoRole != null && !_running) ToggleRun();  // power-user auto-start once the UI is live
     }
 
-    // ---------------- UI construction ----------------
-
-    private void BuildUi()
+    protected override void OnPaint(PaintEventArgs e)
     {
-        Text = "NexKVM";
-        BackColor = Bg;
-        ForeColor = TextCol;
-        Font = new Font("Segoe UI", 9.5f);
-        ClientSize = new Size(540, 640);
-        MinimumSize = new Size(540, 560);
-        StartPosition = FormStartPosition.CenterScreen;
-        FormBorderStyle = FormBorderStyle.Sizable;
-        MaximizeBox = true;
-
-        var root = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, BackColor = Bg, Padding = new Padding(18)
-        };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));  // header
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));  // role
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 176)); // config
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));  // action
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // log
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));  // footer
-        Controls.Add(root);
-
-        root.Controls.Add(BuildHeader(), 0, 0);
-        root.Controls.Add(BuildRole(), 0, 1);
-        root.Controls.Add(BuildConfig(), 0, 2);
-        root.Controls.Add(BuildAction(), 0, 3);
-        root.Controls.Add(BuildLog(), 0, 4);
-        root.Controls.Add(BuildFooter(), 0, 5);
-    }
-
-    private Control BuildHeader()
-    {
-        var p = new Panel { Dock = DockStyle.Fill };
-        var title = new Label
-        {
-            Text = "NexKVM", Font = new Font("Segoe UI Semibold", 20f, FontStyle.Bold),
-            ForeColor = TextCol, AutoSize = true, Location = new Point(0, 0)
-        };
-        var sub = new Label
-        {
-            Text = "Share one mouse & keyboard across your PCs over the LAN",
-            UseMnemonic = false,   // don't treat '&' as an accelerator
-            ForeColor = SubText, AutoSize = true, Location = new Point(2, 38)
-        };
-        p.Controls.Add(title);
-        p.Controls.Add(sub);
-        return p;
-    }
-
-    private Control BuildRole()
-    {
-        var p = new Panel { Dock = DockStyle.Fill };
-        _rbHost = MakeRadio("This PC controls (Host)", 0);
-        _rbReceiver = MakeRadio("This PC is controlled (Receiver)", 262);
-        _rbHost.CheckedChanged += (_, _) => UpdateRoleVisibility();
-        _rbReceiver.CheckedChanged += (_, _) => UpdateRoleVisibility();
-        p.Controls.Add(_rbHost);
-        p.Controls.Add(_rbReceiver);
-        return p;
-    }
-
-    private RadioButton MakeRadio(string text, int x) => new()
-    {
-        Text = text, Location = new Point(x, 12), AutoSize = true,
-        ForeColor = TextCol, Font = new Font("Segoe UI", 10f), FlatStyle = FlatStyle.Standard
-    };
-
-    private Control BuildConfig()
-    {
-        _pnlConfig = new Panel { Dock = DockStyle.Fill, BackColor = Panel, Padding = new Padding(16) };
-        _pnlConfig.Paint += (s, e) => DrawBorder(e.Graphics, _pnlConfig);
-
-        // --- Host controls ---
-        _lblHostIp = MakeLabel("Receiver's IP address", 16, 16);
-        _txtIp = MakeTextBox(16, 40, 300);
-        _txtIp.PlaceholderText = "e.g. 192.168.1.50";
-
-        _lblHostSide = MakeLabel("Receiver is on my", 16, 78);
-        _cmbSide = new ComboBox
-        {
-            Location = new Point(150, 74), Width = 120, DropDownStyle = ComboBoxStyle.DropDownList,
-            FlatStyle = FlatStyle.Flat, BackColor = Bg, ForeColor = TextCol
-        };
-        _cmbSide.Items.AddRange(new object[] { "Left side", "Right side" });
-        _cmbSide.SelectedIndex = 0;
-
-        // --- Receiver controls ---
-        _lblMyIps = MakeLabel("Tell the host one of these IP addresses:", 16, 16);
-        _txtMyIps = new TextBox
-        {
-            Location = new Point(16, 40), Width = 300, ReadOnly = true, BackColor = Bg, ForeColor = Accent,
-            BorderStyle = BorderStyle.FixedSingle, Font = new Font("Consolas", 10f)
-        };
-        _btnCopyIp = MakeSmallButton("Copy", 324, 39);
-        _btnCopyIp.Click += (_, _) => { if (_txtMyIps.Text.Length > 0) Clipboard.SetText(_txtMyIps.Text); };
-
-        // --- Shared controls (port + clipboard) ---
-        var lblPort = MakeLabel("Port", 16, 120);
-        _txtPort = MakeTextBox(60, 116, 80);
-        _txtPort.Text = "24800";
-        _chkClip = new CheckBox
-        {
-            Text = "Sync clipboard text", Location = new Point(170, 118), AutoSize = true,
-            ForeColor = TextCol, Checked = true
-        };
-
-        _pnlConfig.Controls.AddRange(new Control[]
-        {
-            _lblHostIp, _txtIp, _lblHostSide, _cmbSide,
-            _lblMyIps, _txtMyIps, _btnCopyIp,
-            lblPort, _txtPort, _chkClip
-        });
-        return _pnlConfig;
-    }
-
-    private Control BuildAction()
-    {
-        var p = new Panel { Dock = DockStyle.Fill };
-        _btnStartStop = new Button
-        {
-            Text = "Start", Location = new Point(0, 10), Size = new Size(150, 40),
-            FlatStyle = FlatStyle.Flat, BackColor = Accent, ForeColor = Color.Black,
-            Font = new Font("Segoe UI Semibold", 11f, FontStyle.Bold), Cursor = Cursors.Hand
-        };
-        _btnStartStop.FlatAppearance.BorderSize = 0;
-        _btnStartStop.Click += (_, _) => ToggleRun();
-
-        _lblDot = new Label
-        {
-            Text = "●", ForeColor = SubText, AutoSize = true, Font = new Font("Segoe UI", 12f),
-            Location = new Point(172, 18)
-        };
-        _lblStatus = new Label
-        {
-            Text = "Stopped", ForeColor = SubText, AutoSize = true, Font = new Font("Segoe UI", 10.5f),
-            Location = new Point(194, 20)
-        };
-        p.Controls.Add(_btnStartStop);
-        p.Controls.Add(_lblDot);
-        p.Controls.Add(_lblStatus);
-        return p;
-    }
-
-    private Control BuildLog()
-    {
-        _txtLog = new TextBox
-        {
-            Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical,
-            BackColor = Color.FromArgb(22, 22, 27), ForeColor = Color.FromArgb(200, 205, 210),
-            BorderStyle = BorderStyle.FixedSingle, Font = new Font("Consolas", 9f)
-        };
-        return _txtLog;
-    }
-
-    private Control BuildFooter() => new Label
-    {
-        Dock = DockStyle.Fill, Text = "Failsafe: press Ctrl+Alt+F12 to force control back to this PC.",
-        ForeColor = SubText, Font = new Font("Segoe UI", 8.5f), TextAlign = ContentAlignment.MiddleLeft
-    };
-
-    // ---------------- helpers ----------------
-
-    private static Label MakeLabel(string text, int x, int y) => new()
-    {
-        Text = text, Location = new Point(x, y), AutoSize = true, ForeColor = SubText
-    };
-
-    private static TextBox MakeTextBox(int x, int y, int w) => new()
-    {
-        Location = new Point(x, y), Width = w, BackColor = Bg, ForeColor = TextCol,
-        BorderStyle = BorderStyle.FixedSingle, Font = new Font("Segoe UI", 10f)
-    };
-
-    private Button MakeSmallButton(string text, int x, int y)
-    {
-        var b = new Button
-        {
-            Text = text, Location = new Point(x, y), Size = new Size(64, 26),
-            FlatStyle = FlatStyle.Flat, BackColor = Panel, ForeColor = TextCol, Cursor = Cursors.Hand
-        };
-        b.FlatAppearance.BorderColor = Border;
-        return b;
-    }
-
-    private static void DrawBorder(Graphics g, Control c)
-    {
-        using var pen = new Pen(Border);
-        g.DrawRectangle(pen, 0, 0, c.Width - 1, c.Height - 1);
+        float s = DeviceDpi / 96f;
+        var g = e.Graphics;
+        const TextFormatFlags flags = TextFormatFlags.NoPadding;
+        int x = (int)(24 * s), y = (int)(14 * s);
+        TextRenderer.DrawText(g, "Nex", Theme.Brand, new Point(x, y), Theme.Text, flags);
+        x += TextRenderer.MeasureText(g, "Nex", Theme.Brand, Size.Empty, flags).Width;
+        TextRenderer.DrawText(g, "KVM", Theme.Brand, new Point(x, y), Theme.Accent, flags);
+        TextRenderer.DrawText(g, "Mouse and keyboard sharing over your local network", Theme.Body,
+            new Point((int)(25 * s), (int)(54 * s)), Theme.Muted, flags);
     }
 
     // ---------------- role / state ----------------
 
-    private void UpdateRoleVisibility()
+    private void UpdateRole()
     {
-        bool host = _rbHost.Checked;
-        _lblHostIp.Visible = _txtIp.Visible = _lblHostSide.Visible = _cmbSide.Visible = host;
-        _lblMyIps.Visible = _txtMyIps.Visible = _btnCopyIp.Visible = !host;
-        if (!host)
+        bool host = IsHost;
+        _txtIp.Visible = host;
+        _txtMyIp.Visible = _btnCopy.Visible = !host;
+        _cardArrange.Visible = host;
+
+        if (host)
+        {
+            _roleHint.Text = "This PC shares its mouse and keyboard with the receiver.";
+            _lblAddr.Text = "Receiver address";
+            _connHint.Text = "The address shown in NexKVM on the receiver PC.";
+            _footer.Text = "Press Ctrl+Alt+F12 at any time to bring control back to this PC.";
+        }
+        else
         {
             var ips = NetUtil.LocalIPv4();
-            _txtMyIps.Text = ips.Count > 0 ? string.Join("   ", ips) : "(no LAN IP found)";
+            _roleHint.Text = "This PC is controlled by the host's mouse and keyboard.";
+            _lblAddr.Text = "This PC's address";
+            _txtMyIp.Text = ips.Count > 0 ? ips[0] : "";
+            _connHint.Text = ips.Count switch
+            {
+                0 => "No network address found. Check the network connection.",
+                1 => "Enter this address in NexKVM on the host PC.",
+                _ => "Also reachable at " + string.Join(", ", ips.Skip(1)),
+            };
+            _footer.Text = "Keep NexKVM running here while the host is in control. It can stay minimised.";
         }
+        LayoutUi();
     }
 
     private void ApplySettings()
     {
-        if (_cfg.Role == "receiver") _rbReceiver.Checked = true; else _rbHost.Checked = true;
+        _role.SelectedIndex = _cfg.Role == "receiver" ? 1 : 0;
         _txtIp.Text = _cfg.TargetIp;
         _txtPort.Text = _cfg.Port.ToString();
-        _cmbSide.SelectedIndex = _cfg.Side == "Right" ? 1 : 0;
-        _chkClip.Checked = _cfg.Clipboard;
+        _arrange.Side = Enum.TryParse(_cfg.Side, out TargetSide side) ? side : TargetSide.Left;
+        _clip.Checked = _cfg.Clipboard;
     }
 
     private void SaveSettings()
     {
-        _cfg.Role = _rbReceiver.Checked ? "receiver" : "host";
+        _cfg.Role = IsHost ? "host" : "receiver";
         _cfg.TargetIp = _txtIp.Text.Trim();
         _cfg.Port = int.TryParse(_txtPort.Text, out int p) ? p : 24800;
-        _cfg.Side = _cmbSide.SelectedIndex == 1 ? "Right" : "Left";
-        _cfg.Clipboard = _chkClip.Checked;
+        _cfg.Side = _arrange.Side.ToString();
+        _cfg.Clipboard = _clip.Checked;
         _cfg.Save();
     }
 
@@ -279,29 +230,33 @@ internal sealed class MainForm : Form
     {
         if (_running) { StopEngines(); return; }
 
-        int port = int.TryParse(_txtPort.Text, out int p) && p is > 0 and < 65536 ? p : 24800;
-        bool clip = _chkClip.Checked;
+        if (!int.TryParse(_txtPort.Text, out int port) || port is <= 0 or >= 65536)
+        {
+            AppendLog("ERROR: the port must be a number between 1 and 65535.");
+            _txtPort.Box.Focus();
+            return;
+        }
 
-        if (_rbHost.Checked)
+        if (IsHost)
         {
             string ip = _txtIp.Text.Trim();
             if (!IPAddress.TryParse(ip, out _))
             {
-                AppendLog("Please enter a valid receiver IP address (e.g. 192.168.1.50).");
+                AppendLog("ERROR: enter the receiver's address first, for example 192.168.1.50.");
+                _txtIp.Box.Focus();
                 return;
             }
-            var side = _cmbSide.SelectedIndex == 1 ? TargetSide.Right : TargetSide.Left;
-            var host = new HostEngine(ip, port, side, clip);
+            var host = new HostEngine(ip, port, _arrange.Side, _clip.Checked);
             host.Log += AppendLog;
-            host.StatusChanged += OnStatus;
+            host.StatusChanged += ShowStatus;
             _host = host;
             host.Start();
         }
         else
         {
-            var target = new TargetEngine(port, clip);
+            var target = new TargetEngine(port, _clip.Checked);
             target.Log += AppendLog;
-            target.StatusChanged += OnStatus;
+            target.StatusChanged += ShowStatus;
             _target = target;
             target.Start();
         }
@@ -317,42 +272,48 @@ internal sealed class MainForm : Form
         _target?.Stop(); _target = null;
         _running = false;
         SetRunningUi(false);
-        OnStatus(EngineStatus.Stopped);
+        ShowStatus(EngineStatus.Stopped);
     }
 
     private void SetRunningUi(bool running)
     {
-        _btnStartStop.Text = running ? "Stop" : "Start";
-        _btnStartStop.BackColor = running ? StopCol : Accent;
-        _rbHost.Enabled = _rbReceiver.Enabled = !running;
-        _txtIp.Enabled = _cmbSide.Enabled = _txtPort.Enabled = _chkClip.Enabled = !running;
+        _btnRun.Text = running ? "Stop" : "Start";
+        _btnRun.Kind = running ? ButtonKind.Danger : ButtonKind.Primary;
+        _role.Enabled = _txtIp.Enabled = _txtPort.Enabled = _clip.Enabled = _arrange.Enabled = !running;
     }
 
-    private void OnStatus(EngineStatus s)
+    private void ShowStatus(EngineStatus s)
     {
-        if (InvokeRequired) { BeginInvoke(new Action(() => OnStatus(s))); return; }
-        (string text, Color col) = s switch
+        if (InvokeRequired) { BeginInvoke(new Action(() => ShowStatus(s))); return; }
+        _status = s;
+        (string text, Color color) = s switch
         {
-            EngineStatus.Listening => ("Listening for host…", Amber),
-            EngineStatus.Connecting => ("Connecting…", Amber),
-            EngineStatus.Connected => ("Connected", Accent),
-            EngineStatus.Controlling => ("Controlling receiver", Blue),
-            _ => ("Stopped", SubText),
+            EngineStatus.Listening => ("Waiting for host", Theme.Warning),
+            EngineStatus.Connecting => ("Connecting", Theme.Warning),
+            EngineStatus.Connected => ("Connected", Theme.Success),
+            EngineStatus.Controlling => ("Controlling receiver", Theme.Accent),
+            _ => ("Not running", Theme.Muted),
         };
-        _lblStatus.Text = text;
-        _lblStatus.ForeColor = col;
-        _lblDot.ForeColor = col;
+        _pill.Set(text, color);
     }
 
     private void AppendLog(string line)
     {
         if (InvokeRequired) { BeginInvoke(new Action(() => AppendLog(line))); return; }
-        string stamp = DateTime.Now.ToString("HH:mm:ss");
-        _txtLog.AppendText($"[{stamp}] {line}\r\n");
-        if (_txtLog.TextLength > 16000)
-            _txtLog.Text = _txtLog.Text[^12000..];
-        _txtLog.SelectionStart = _txtLog.TextLength;
-        _txtLog.ScrollToCaret();
+
+        if (_log.Lines.Length > 500)   // keep the log bounded: drop the oldest lines
+        {
+            _log.ReadOnly = false;
+            _log.Select(0, _log.GetFirstCharIndexFromLine(200));
+            _log.SelectedText = "";
+            _log.ReadOnly = true;
+        }
+        _log.Select(_log.TextLength, 0);
+        _log.SelectionColor = Theme.Muted;
+        _log.AppendText(DateTime.Now.ToString("HH:mm:ss") + "  ");
+        _log.SelectionColor = line.StartsWith("ERROR") ? Theme.Danger : Theme.Text;
+        _log.AppendText(line + "\n");
+        _log.ScrollToCaret();
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
